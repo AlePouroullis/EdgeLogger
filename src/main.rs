@@ -1,14 +1,36 @@
 mod message;
-use message::{LogMessage, Response};
+mod db;
 use serde_json;
 use tokio::net::TcpListener;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::{sleep, Duration};
 use std::str;
 use chrono::Utc;
+use dotenvy::dotenv;
+use message::{LogMessage, Response};
+use db::pool::create_pool;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    dotenv().ok();
+
+    let pool = match create_pool().await {
+        Ok(pool) => pool,
+        Err(e) => {
+            eprintln!("Failed to create pool: {:?}", e);
+            return Ok(());
+        }
+    };
+
+    match pool.acquire().await {
+        Ok(conn) => {
+            println!("Connected to database");
+        }
+        Err(e) => {
+            eprintln!("Failed to acquire connection: {:?}", e);
+        }
+    };
+
     let listener = TcpListener::bind("127.0.0.1:8000").await?;
     println!("Server listening on port 8000...");
 
