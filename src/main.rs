@@ -1,21 +1,22 @@
 mod message;
 mod db;
+use std::str;
 use serde_json;
 use tokio::net::TcpListener;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::time::{sleep, Duration};
-use std::str;
 use chrono::Utc;
 use dotenvy::dotenv;
 use message::{LogMessage, Response};
 use db::pool::create_pool;
+use db::models::{MachineLog, Metric};
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     dotenv().ok();
 
     let pool = match create_pool().await {
-        Ok(pool) => pool,
+        Ok(pool) => Arc::new(pool),
         Err(e) => {
             eprintln!("Failed to create pool: {:?}", e);
             return Ok(());
@@ -37,6 +38,7 @@ async fn main() -> std::io::Result<()> {
     loop {
         let (mut stream, addr) = listener.accept().await?;
         println!("New connection from {}", addr);
+        let pool = Arc::clone(&pool);
 
         tokio::spawn(async move {
             let mut buffer = [0; 1024];
@@ -54,19 +56,40 @@ async fn main() -> std::io::Result<()> {
                                 Ok(log_message) => {
                                     println!("Processing message from machine: {}", log_message.machine_id);
                 
-                                    // Simulate some processing time - different for each machine
-                                    let delay = Duration::from_millis(
-                                        100 * (log_message.machine_id.split('-').nth(1).unwrap_or("1").parse::<u64>().unwrap_or(1))
-                                    );
-                                    sleep(delay).await;  // Note the .await here!
+                                    // Save log to database with original raw JSON
+                                    let raw_json: serde_json::Value = serde_json::from_str(message_str)
+                                        .expect("Valid JSON already checked");
                                     
-                                    println!("Finished processing message from machine: {}", log_message.machine_id);
-                                    
-                                    Response {
-                                        status: "success".to_string(),
-                                        message: "Log received".to_string(),
-                                        timestamp: Utc::now().to_rfc3339()
+                                    let metrics: Vec<(String, f64)> = log_message.metrics
+                                    .into_iter()
+                                    .map(|(name, value)| (name, value))
+                                    .collect();
+
+                                    match MachineLog::create_with_metrics(
+                                        &pool,
+                                        log_message.machine_id.clone(),
+                                        raw_json,
+                                        metrics
+                                    ).await {
+                                        Ok((log, metrics)) => {
+                                            println!("Stored log and {} metrics", metrics.len());
+                                            Response {
+                                                status: "success".to_string(),
+                                                message: "Log received and stored".to_string(),
+                                                timestamp: Utc::now().to_rfc3339()
+                                            }
+                                        },
+                                        Err(e) => {
+                                            eprintln!("Failed to store log: {}", e);
+                                            Response {
+                                                status: "error".to_string(),
+                                                message: "Failed to store log".to_string(),
+                                                timestamp: Utc::now().to_rfc3339()
+                                            }
+                                        }
                                     }
+                                    
+                               
                                 }
                                 Err(e) => {
                                     println!("Failed to parse JSON: {}", e);

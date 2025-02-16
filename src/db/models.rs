@@ -20,29 +20,66 @@ pub struct Metric {
 }
 
 impl MachineLog {
-    // Create (insert)
-    pub async fn create(
+    pub async fn create_with_metrics(
         pool: &PgPool,
         machine_id: String,
-        raw_data: serde_json::Value
-    ) -> Result<Self, sqlx::Error> {
-        sqlx::query_as!(
+        raw_data: serde_json::Value,
+        metrics: Vec<(String, f64)>
+    ) -> Result<(Self, Vec<Metric>), sqlx::Error> {
+        let mut tx = pool.begin().await?;
+
+        let log = sqlx::query_as!(
             Self,
             r#"
             INSERT INTO machine_logs (machine_id, timestamp, raw_data)
-            VALUES ($1, $2, $3) 
-            RETURNING id, machine_id, timestamp as "timestamp!: DateTime<Utc>", 
-            raw_data, created_at as "created_at!: DateTime<Utc>"
+            VALUES ($1, $2, $3)
+            RETURNING id, machine_id, timestamp as "timestamp!: DateTime<Utc>",
+                raw_data, created_at as "created_at!: DateTime<Utc>"
             "#,
             machine_id, 
             Utc::now(),
             raw_data
         )
-        .fetch_one(pool)
-        .await
+        .fetch_one(&mut *tx)
+        .await?;
+
+        let (ids, names, values): (Vec<i32>, Vec<String>, Vec<f64>) = metrics 
+        .into_iter()
+        .map(|(name, value)| (log.id, name, value))
+        .fold(
+            (Vec::new(), Vec::new(), Vec::new()),
+            |(mut ids, mut names, mut vals), (id, name, val)| {
+                ids.push(id);
+                names.push(name);
+                vals.push(val);
+                (ids, names, vals)
+            }
+        );
+
+        let stored_metrics = if !ids.is_empty() {
+            sqlx::query_as!(
+                Metric,
+                r#"
+                INSERT INTO metrics (log_id, metric_name, metric_value)
+                SELECT * FROM UNNEST($1::int[], $2::text[], $3::float8[])
+                RETURNING id as "id!", log_id as "log_id!",
+                metric_name as "metric_name!", metric_value as "metric_value!"
+                "#,
+                &ids,
+                &names,
+                &values
+            )
+            .fetch_all(&mut *tx)
+            .await? 
+        } else {
+            vec![]
+        };
+
+        tx.commit().await?;
+
+        Ok((log, stored_metrics))
     }
 
-    // Read 
     pub async fn find_by_id(pool: &PgPool, id: i32) -> Result<Option<Self>, sqlx::Error> {
         sqlx::query_as!(
             Self,
@@ -57,7 +94,6 @@ impl MachineLog {
         .await
     }
 
-    // Query methods specific to your domain 
     pub async fn find_by_machine_id(
         pool: &PgPool,
         machine_id: &str
@@ -75,7 +111,6 @@ impl MachineLog {
         .await
     }
 
-    // Get all metrics for this log
     pub async fn metrics(&self, pool: &PgPool) -> Result<Vec<Metric>, sqlx::Error> {
         Metric::find_by_log_id(pool, self.id).await
     }
