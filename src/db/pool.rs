@@ -1,13 +1,8 @@
-use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
 use std::time::Duration;
 use std::env;
-
-#[derive(Debug)]
-pub enum PoolError {
-    DatabaseError(sqlx::Error),
-    ConfigError(env::VarError),
-}
+use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
+use super::error::PoolError;
 
 pub async fn create_pool() -> Result<PgPool, PoolError> {
     let database_url = env::var("DATABASE_URL")
